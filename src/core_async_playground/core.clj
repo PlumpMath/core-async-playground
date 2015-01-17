@@ -14,11 +14,8 @@
               :else (recur (- remaining-sum pennies))))))
     [money snacks]))
 
-(def sm (snack-machine "Picnic" 30))
-(def money (first sm))
-(def snacks (second sm))
-(>!! money 29)
-(>!! money 1)
-(alts!! [snacks (timeout 3000)])
-(close! snacks)
-(close! money)
+(defn put-money!! [[money _] amount]
+  (>!! money amount))
+
+(defn get-snack!! [[_ snacks]]
+  (first (alts!! [snacks (timeout 1000)])))
