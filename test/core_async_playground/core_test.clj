@@ -18,3 +18,9 @@
     (is (= nil (get-snack!! sm)))
     (put-money!! sm 10)
     (is (= "Picnic" (get-snack!! sm)))))
+
+(deftest snack-machine-discards-change
+  (let [sm (snack-machine "Picnic" 30)]
+    (put-money!! sm 100)
+    (is (= "Picnic" (get-snack!! sm)))
+    (is (= nil (get-snack!! sm)))))
