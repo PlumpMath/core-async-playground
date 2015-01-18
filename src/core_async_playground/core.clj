@@ -14,7 +14,7 @@
     [money snacks]))
 
 (defn put-money!! [[money _] amount]
-  (>!! money amount))
+  (first (alts!! [[money amount] (timeout 1000)])))
 
 (defn get-snack!! [[_ snacks]]
   (first (alts!! [snacks (timeout 1000)])))
