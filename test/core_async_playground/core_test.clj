@@ -19,8 +19,9 @@
     (put-money!! sm 10)
     (is (= "Picnic" (get-snack!! sm)))))
 
-(deftest snack-machine-discards-change
+(deftest snack-machine-several-snacks
   (let [sm (snack-machine "Picnic" 30)]
-    (put-money!! sm 100)
+    (put-money!! sm 70)
+    (is (= "Picnic" (get-snack!! sm)))
     (is (= "Picnic" (get-snack!! sm)))
     (is (= nil (get-snack!! sm)))))

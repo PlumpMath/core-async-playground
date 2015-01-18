@@ -5,13 +5,12 @@
 (defn snack-machine [snack-name cost]
   (let [money (chan)
         snacks (chan)]
-    (go (loop [remaining-sum cost]
-          (let [pennies (<! money)]
-            (cond (>= pennies remaining-sum)
-              (do
-                (>! snacks snack-name)
-                (recur cost))
-              :else (recur (- remaining-sum pennies))))))
+    (go (loop [money-received 0]
+          (cond (>= money-received cost)
+            (do
+              (>! snacks snack-name)
+              (recur (- money-received cost)))
+            :else (recur (+ money-received (<! money))))))
     [money snacks]))
 
 (defn put-money!! [[money _] amount]
