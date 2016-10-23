@@ -5,28 +5,28 @@
     [clojure.core.match :refer (match)]
   ))
 
-; add state to sys
+; proper state management in sys
 ; retry aborts
 ; add timeouts for write and prepare
 ; think about other exceptional scenarios
 
 (defn two-pc []
-  (let [coord (chan 100)
-        sys1 (chan 100)
-        sys2 (chan 100)
-        log (chan 100)
+  (let [coord (chan 100) ; transaction coordinator
+        sys1 (chan 100)  ; system 1 participating in transaction
+        sys2 (chan 100)  ; system 2 participating in transaction
+        log (chan 100)   ; logger
         log-fn #(put! log %)
         result     
         [
           {:chan coord
-           :ss {:sys1 sys1 :sys2 sys2}
-           :state {:sys1 (atom "init") :sys2 (atom "init")}
+           :ss {:sys1 sys1 :sys2 sys2} ; list of participating systems
+           :state {:sys1 (atom "init") :sys2 (atom "init")} ; state of systems as viewed by coordinator
            :log log-fn
           }
           {:id :sys1
            :chan sys1
-           :value (ref nil)
-           :value-unc (ref nil)
+           :value (ref nil) ; current committed value
+           :value-unc (ref nil) ; current uncommitted value with status - write-ok/prepare-ok
            :log log-fn}
           {:id :sys2
            :chan sys2
@@ -107,37 +107,45 @@
         "TRANSACTION FAILED"))
   ))
 
+(defn- update-sys-state [sys msg st]
+  (match [msg st]
+    [{:cmd "write" :value value} "write-ok"]
+      (dosync (ref-set (:value-unc sys) {:value value :state "write-ok"}))
+    [{:cmd "write" :value _} "write-not-ok"]
+      nil 
+    [{:cmd "prepare"} "prepare-ok"]
+      (dosync (alter (:value-unc sys) #(merge % {:state "prepare-ok"})))
+    [{:cmd "prepare"} "prepare-not-ok"]
+      (dosync (ref-set (:value-unc sys) nil))
+    [{:cmd "commit"} "commit-ok"]
+      (dosync
+        (ref-set (:value sys) (:value @(:value-unc sys)))
+        (ref-set (:value-unc sys) nil))
+    [{:cmd "commit"} "commit-not-ok"]
+      nil
+    [{:cmd "abort"} "abort-ok"]
+      (dosync (ref-set (:value-unc sys) nil))
+    :else
+      (log sys (str "BAD TRANSITION: msg=" msg ", state=" st)))
+  (log sys (str (:id sys) " state: value=" @(:value sys) ", value-unc=" @(:value-unc sys))))
+
+(defn <!!-timeout 
+  ([timeout ch] (first (alts!! [ch (async/timeout timeout)])))
+  ([ch] (<!!-timeout 100 ch)))
+
 (defn receive-and-reply 
   ([sys st timeout]
-    (first (alts!!
-      [(go
+    (<!!-timeout timeout
+      (go
         (let [[msg sender] (<! (:chan sys))
               id (:id sys)]
           (log sys (str id " received " msg))
-          (match [msg st]
-            [{:cmd "write" :value value} "write-ok"]
-              (dosync (ref-set (:value-unc sys) {:value value :state "write-ok"}))
-            [{:cmd "write" :value _} "write-not-ok"]
-              nil 
-            [{:cmd "prepare"} "prepare-ok"]
-              (dosync (alter (:value-unc sys) #(merge % {:state "prepare-ok"})))
-            [{:cmd "prepare"} "prepare-not-ok"]
-              (dosync (ref-set (:value-unc sys) nil))
-            [{:cmd "commit"} "commit-ok"]
-              (dosync
-                (ref-set (:value sys) (:value @(:value-unc sys)))
-                (ref-set (:value-unc sys) nil))
-            [{:cmd "commit"} "commit-not-ok"]
-              nil
-            [{:cmd "abort"} "abort-ok"]
-              (dosync (ref-set (:value-unc sys) nil))
-            :else
-              (log sys (str "BAD TRANSITION: msg=" msg ", state=" st)))
-          (log sys (str id " state: value=" @(:value sys) ", value-unc=" @(:value-unc sys)))
+
+          (update-sys-state sys msg st)
+
           (>! sender [id st])
           (log sys (str id " sent " st))
-          msg))
-      (async/timeout timeout)]))
-  )
+
+          msg))))
   ([sys st] (receive-and-reply sys st 100)))
 

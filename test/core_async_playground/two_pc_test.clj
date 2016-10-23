@@ -3,10 +3,10 @@
             [core-async-playground.two-pc :refer :all]
             [clojure.core.async :as async :refer [<! >! <!! >!! timeout chan alt! alts! alts!! go close! thread]]))
 
-(defn <!!-timeout [ch] (first (alts!! [ch (timeout 100)])))
 (defn assert-value [sys value value-unc]
   (is (= value @(:value sys)))
   (is (= value-unc @(:value-unc sys))))
+
 (defn setup-transact [coord value test-chan]
   (go 
     (let [result (<! (transact coord value))]
