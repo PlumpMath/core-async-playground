@@ -1,118 +1,140 @@
 (ns core-async-playground.two-pc
   (:require [clojure.core.async :as async :refer [<! >! <!! >!! timeout chan alt! alts! alts!! go go-loop close! thread put!]]))
 
-; refactoring for unit tests
 ; retry aborts
 ; add timeouts for write and prepare
 ; add values storage
 
-(def coord (chan 100))
-(def ss {:sys1 (chan 100) :sys2 (chan 100)})
-(defn ss-ids [] (keys ss))
+(defn two-pc []
+  (let [coord (chan 100)
+        sys1 (chan 100)
+        sys2 (chan 100)
+        log (chan 100)
+        log-fn #(put! log %)
+        result     
+        [
+          {:chan coord
+           :ss {:sys1 sys1 :sys2 sys2}
+           :state {:sys1 (atom "init") :sys2 (atom "init")}
+           :log log-fn
+          }
+          {:id :sys1
+           :chan sys1
+           :value (atom 0)
+           :value-unc (atom nil)
+           :log log-fn}
+          {:id :sys2
+           :chan sys2
+           :value (atom 0)
+           :value-unc (atom nil)
+           :log log-fn}
+        ]]
+    (go-loop []
+      (when-let [msg (<! log)]
+        (println "## " msg)
+        (recur)))
+    (log-fn "2PC initailized")
+    result
+  ))
 
-(def state {:sys1 (atom "init") :sys2 (atom "init")})
-(defn print-state [] (str "STATE: " (vec (map (fn [[id st]] [id @st]) state))))
+(defn- print-state [coord]
+  (str "STATE: " (vec (map (fn [[id st]] [id @st]) (:state coord)))))
+(defn- log [log-holder msg]
+  ((:log log-holder) msg))
+(defn- log-state [coord]
+  (log coord (print-state coord)))
 
-(def vv {:sys1 (atom 0) :sys2 (atom 0)})
-(def vv-unc {:sys1 (atom nil) :sys2 (atom nil)})
+(defn- set-state! [coord id st] 
+  (reset! (id (:state coord)) st)
+  (log-state coord))
+(defn- check-state [coord st]
+  (reduce #(and %1 %2) (map #(= @% st) (vals (:state coord)))))
+(defn- ids-bad-state [coord st]
+  (keys (filter #(not= @(second %) st) (:state coord))))
 
-
-(def log (chan 100))
-(go-loop []
-  (when-let [msg (<! log)]
-    (println msg)
-    (recur)))
-(defn log! [msg] (put! log msg))
-(defn log-state! [] (log! (print-state)))
-
-(defn set-state! [id st]
-  (do 
-    (reset! (id state) st))
-    (log-state!))
-
-(defn check-state [st] (reduce #(and %1 %2) (map #(= @% st) (vals state))))
-(defn ids-bad-state [st] (keys (filter #(not= @(second %) st) state)))
-
-(defn send-cmd [ids cmd]
+(defn- send-cmd [coord ids cmd]
   (doseq [id ids]
-    (>!! (id ss) [coord cmd])
-    (log! (str "coord sent " cmd " to " id))
-    (set-state! id (:cmd cmd))))
+    (>!! (id (:ss coord)) [(:chan coord) cmd])
+    (log coord (str "coord sent " cmd " to " id))
+    (set-state! coord id (:cmd cmd))))
 
-(defn receive-acks [ids]
+(defn- receive-acks [coord ids]
   (doseq [_ ids]
-    (let [[id st] (<!! coord)]
-      (log! (str "coord received " st " from " id))
-      (set-state! id st))))
+    (let [[id st] (<!! (:chan coord))]
+      (log coord (str "coord received " st " from " id))
+      (set-state! coord id st))))
 
-(defn transact [value]
+(defn transact [coord value]
   (thread
-    (log! "TRANSACTION STARTED")
-    (log-state!)
+    (log coord (str "TRANSACTION STARTED for value " value))
+    (log-state coord)
 
-    (send-cmd (ss-ids) {:cmd "write" :value value})
-    (receive-acks (ss-ids))
+    (send-cmd coord (keys (:ss coord)) {:cmd "write" :value value})
+    (receive-acks coord (keys (:ss coord)))
 
-    (if (check-state "write-ok")
+    (if (check-state coord "write-ok")
       (do
-        (log! "WRITE OK")
+        (log coord "WRITE OK")
 
-        (send-cmd (ss-ids) {:cmd "prepare"})
-        (receive-acks (ss-ids))
+        (send-cmd coord (keys (:ss coord)) {:cmd "prepare"})
+        (receive-acks coord (keys (:ss coord)))
 
-        (if (check-state "prepare-ok")
+        (if (check-state coord "prepare-ok")
           (do
-            (log! "PREPARE OK")
+            (log coord "PREPARE OK")
 
-            (while (not (check-state "commit-ok"))
-              (let [ids (ids-bad-state "commit-ok")]
-                (send-cmd ids {:cmd "commit"})
-                (receive-acks ids)))
+            (while (not (check-state coord "commit-ok"))
+              (let [ids (ids-bad-state coord "commit-ok")]
+                (send-cmd coord ids {:cmd "commit"})
+                (receive-acks coord ids)))
 
-            (log! "COMMIT OK")
+            (log coord "COMMIT OK")
             "TRANSACTION SUCCEEDED")
           ; prepare not ok
           (do
-            (send-cmd (ss-ids) {:cmd "abort"})
-            (receive-acks (ss-ids))
+            (send-cmd coord (keys (:ss coord)) {:cmd "abort"})
+            (receive-acks coord (keys (:ss coord)))
             "TRANSACTION FAILED"))
       )
       ; write not ok
       (do
-        (send-cmd (ss-ids) {:cmd "abort"})
-        (receive-acks (ss-ids))
+        (send-cmd coord (keys (:ss coord)) {:cmd "abort"})
+        (receive-acks coord (keys (:ss coord)))
         "TRANSACTION FAILED"))
   ))
 
-(defn receive-and-reply [id st]
+(defn receive-and-reply [sys st]
   (go
-    (let [[sender msg] (<! (id ss))]
-      (log! (str id " received " msg))
+    (let [[sender msg] (<! (:chan sys))
+          id (:id sys)]
+      (log sys (str id " received " msg))
       (>! sender [id st])
-      (log! (str id " sent " st))
-  ))
-  "")
+      (log sys (str id " sent " st))
+  )))
 
-;;
+;;;
 
-(go 
-  (log! (<! (transact 11)))
-  (log-state!))
-    
-;;
-
-(receive-and-reply :sys1 "write-ok")
-(receive-and-reply :sys2 "write-ok")
-(receive-and-reply :sys1 "prepare-ok")
-(receive-and-reply :sys2 "prepare-ok")
-(receive-and-reply :sys1 "commit-ok")
-(receive-and-reply :sys2 "commit-ok")
-
-;;
-
-(receive-and-reply :sys1 "write-ok")
-(receive-and-reply :sys2 "write-not-ok")
-(receive-and-reply :sys1 "abort-ok")
-(receive-and-reply :sys2 "abort-ok")
-
-
+(let [[coord sys1 sys2] (two-pc)]
+  (go 
+    (log coord (<! (transact coord 11)))
+    (log-state coord))
+  (receive-and-reply sys1 "write-ok")
+  (receive-and-reply sys2 "write-ok")
+  (receive-and-reply sys1 "prepare-ok")
+  (receive-and-reply sys2 "prepare-ok")
+  (receive-and-reply sys1 "commit-not-ok")
+  (receive-and-reply sys2 "commit-ok")  
+  (receive-and-reply sys1 "commit-ok")
+  ""
+)
+  
+(let [[coord sys1 sys2] (two-pc)]
+  (go 
+    (log coord (<! (transact coord 11)))
+    (log-state coord))
+  (receive-and-reply sys1 "write-ok")
+  (receive-and-reply sys2 "write-not-ok")
+  (receive-and-reply sys1 "abort-ok")
+  (receive-and-reply sys2 "abort-ok")
+  ""
+)
