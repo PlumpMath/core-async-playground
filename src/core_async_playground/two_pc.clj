@@ -1,14 +1,14 @@
 (ns core-async-playground.two-pc
   (:require [clojure.core.async :as async :refer [<! >! <!! >!! timeout chan alt! alts! alts!! go go-loop close! thread put!]]))
 
-; refactoring, deduplication in `transact`
-; add abort
-; add retry of messages
-; add values storage
+; refactoring for unit tests
+; retry aborts
 ; add timeouts for write and prepare
+; add values storage
 
 (def coord (chan 100))
 (def ss {:sys1 (chan 100) :sys2 (chan 100)})
+(defn ss-ids [] (keys ss))
 
 (def state {:sys1 (atom "init") :sys2 (atom "init")})
 (defn print-state [] (str "STATE: " (vec (map (fn [[id st]] [id @st]) state))))
@@ -31,15 +31,16 @@
     (log-state!))
 
 (defn check-state [st] (reduce #(and %1 %2) (map #(= @% st) (vals state))))
+(defn ids-bad-state [st] (keys (filter #(not= @(second %) st) state)))
 
-(defn send-cmd [cmd]
-  (doseq [[id sys] ss]
-    (>!! sys cmd)
+(defn send-cmd [ids cmd]
+  (doseq [id ids]
+    (>!! (id ss) [coord cmd])
     (log! (str "coord sent " cmd " to " id))
     (set-state! id (:cmd cmd))))
 
-(defn receive-acks []
-  (doseq [_ ss]
+(defn receive-acks [ids]
+  (doseq [_ ids]
     (let [[id st] (<!! coord)]
       (log! (str "coord received " st " from " id))
       (set-state! id st))))
@@ -49,57 +50,55 @@
     (log! "TRANSACTION STARTED")
     (log-state!)
 
-    ; send write
-    (send-cmd {:cmd "write" :value value})
-    ; receive write acks
-    (receive-acks)
+    (send-cmd (ss-ids) {:cmd "write" :value value})
+    (receive-acks (ss-ids))
 
     (if (check-state "write-ok")
       (do
         (log! "WRITE OK")
 
-        ; send prepare
-        (send-cmd {:cmd "prepare"})
-        ; receive prepape acks
-        (receive-acks)
+        (send-cmd (ss-ids) {:cmd "prepare"})
+        (receive-acks (ss-ids))
 
         (if (check-state "prepare-ok")
           (do
             (log! "PREPARE OK")
 
-            ; send commit
-            (send-cmd {:cmd "commit"})
-            ; receive commit acks
-            (receive-acks)
+            (while (not (check-state "commit-ok"))
+              (let [ids (ids-bad-state "commit-ok")]
+                (send-cmd ids {:cmd "commit"})
+                (receive-acks ids)))
 
-            (if (check-state "commit-ok")
-              (do (log! "COMMIT OK") true)
-              false))
-          false)
+            (log! "COMMIT OK")
+            "TRANSACTION SUCCEEDED")
+          ; prepare not ok
+          (do
+            (send-cmd (ss-ids) {:cmd "abort"})
+            (receive-acks (ss-ids))
+            "TRANSACTION FAILED"))
       )
       ; write not ok
       (do
-        ; send abort
-        (send-cmd {:cmd "abort"})
-        ; receive abort acks
-        (receive-acks)
-        false))
+        (send-cmd (ss-ids) {:cmd "abort"})
+        (receive-acks (ss-ids))
+        "TRANSACTION FAILED"))
   ))
 
 (defn receive-and-reply [id st]
   (go
-    (log! (str id " received " (<! (id ss))))
-    (>! coord [id st])
-    (log! (str id " sent " st))
+    (let [[sender msg] (<! (id ss))]
+      (log! (str id " received " msg))
+      (>! sender [id st])
+      (log! (str id " sent " st))
   ))
+  "")
 
 ;;
 
 (go 
-  (if (<! (transact 11))
-    (do (log! "TRANSACTION SUCCEEDED") (log-state!))
-    (do (log! "TRANSACTION FAILED") (log-state!))))
-
+  (log! (<! (transact 11)))
+  (log-state!))
+    
 ;;
 
 (receive-and-reply :sys1 "write-ok")
