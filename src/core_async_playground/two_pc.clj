@@ -2,11 +2,13 @@
   (:require
     [clojure.core.async :as async :refer [<! >! <!! >!! chan alt! alts! alts!! go go-loop close! thread put!]]
     [clojure.algo.generic.functor :refer (fmap)]
+    [clojure.core.match :refer (match)]
   ))
 
+; add state to sys
 ; retry aborts
 ; add timeouts for write and prepare
-; add values storage
+; think about other exceptional scenarios
 
 (defn two-pc []
   (let [coord (chan 100)
@@ -23,13 +25,13 @@
           }
           {:id :sys1
            :chan sys1
-           :value (atom 0)
-           :value-unc (atom nil)
+           :value (ref nil)
+           :value-unc (ref nil)
            :log log-fn}
           {:id :sys2
            :chan sys2
-           :value (atom 0)
-           :value-unc (atom nil)
+           :value (ref nil)
+           :value-unc (ref nil)
            :log log-fn}
         ]]
     (go-loop []
@@ -110,8 +112,28 @@
     (first (alts!!
       [(go
         (let [[msg sender] (<! (:chan sys))
-                id (:id sys)]
+              id (:id sys)]
           (log sys (str id " received " msg))
+          (match [msg st]
+            [{:cmd "write" :value value} "write-ok"]
+              (dosync (ref-set (:value-unc sys) {:value value :state "write-ok"}))
+            [{:cmd "write" :value _} "write-not-ok"]
+              nil 
+            [{:cmd "prepare"} "prepare-ok"]
+              (dosync (alter (:value-unc sys) #(merge % {:state "prepare-ok"})))
+            [{:cmd "prepare"} "prepare-not-ok"]
+              (dosync (ref-set (:value-unc sys) nil))
+            [{:cmd "commit"} "commit-ok"]
+              (dosync
+                (ref-set (:value sys) (:value @(:value-unc sys)))
+                (ref-set (:value-unc sys) nil))
+            [{:cmd "commit"} "commit-not-ok"]
+              nil
+            [{:cmd "abort"} "abort-ok"]
+              (dosync (ref-set (:value-unc sys) nil))
+            :else
+              (log sys (str "BAD TRANSITION: msg=" msg ", state=" st)))
+          (log sys (str id " state: value=" @(:value sys) ", value-unc=" @(:value-unc sys)))
           (>! sender [id st])
           (log sys (str id " sent " st))
           msg))

@@ -3,22 +3,35 @@
             [core-async-playground.two-pc :refer :all]
             [clojure.core.async :as async :refer [<! >! <!! >!! timeout chan alt! alts! alts!! go close! thread]]))
 
+(defn <!!-timeout [ch] (first (alts!! [ch (timeout 100)])))
+(defn assert-value [sys value value-unc]
+  (is (= value @(:value sys)))
+  (is (= value-unc @(:value-unc sys))))
+(defn setup-transact [coord value test-chan]
+  (go 
+    (let [result (<! (transact coord value))]
+      (>! test-chan result)
+      (log coord result)
+      (log-state coord))))
+
+
 (deftest success
   (let [[coord sys1 sys2] (two-pc)
         test-chan (chan 100)]
     (log coord "\n SUCCESS CASE")
-    (go 
-      (let [result (<! (transact coord 11))]
-        (>! test-chan result)
-        (log coord result)
-        (log-state coord)))
+    (setup-transact coord 11 test-chan)
+
+    (assert-value sys1 nil nil)
     (is (= {:cmd "write" :value 11} (receive-and-reply sys1 "write-ok")))
+    (assert-value sys1 nil {:value 11 :state "write-ok"})
     (is (= {:cmd "write" :value 11} (receive-and-reply sys2 "write-ok")))
     (is (= {:cmd "prepare"} (receive-and-reply sys1 "prepare-ok")))
+    (assert-value sys1 nil {:value 11 :state "prepare-ok"})
     (is (= {:cmd "prepare"} (receive-and-reply sys2 "prepare-ok")))
     (is (= {:cmd "commit"} (receive-and-reply sys1 "commit-ok")))
+    (assert-value sys1 11 nil)
     (is (= {:cmd "commit"} (receive-and-reply sys2 "commit-ok")))
-    (is (= "TRANSACTION SUCCEEDED" (<!! test-chan)))
+    (is (= "TRANSACTION SUCCEEDED" (<!!-timeout test-chan)))
     (is (= {:sys1 "commit-ok" :sys2 "commit-ok"} (state coord)))
   ))
 
@@ -26,20 +39,20 @@
   (let [[coord sys1 sys2] (two-pc)
         test-chan (chan 100)]
     (log coord "\n COMMIT RETRY")
-    (go 
-      (let [result (<! (transact coord 11))]
-        (>! test-chan result)
-        (log coord result)
-        (log-state coord)))
+    (setup-transact coord 11 test-chan)
+
     (is (= {:cmd "write" :value 11} (receive-and-reply sys1 "write-ok")))
     (is (= {:cmd "write" :value 11} (receive-and-reply sys2 "write-ok")))
     (is (= {:cmd "prepare"} (receive-and-reply sys1 "prepare-ok")))
     (is (= {:cmd "prepare"} (receive-and-reply sys2 "prepare-ok")))
     (is (= {:cmd "commit"} (receive-and-reply sys1 "commit-not-ok")))
+    (assert-value sys1 nil {:value 11 :state "prepare-ok"})
     (is (= {:cmd "commit"} (receive-and-reply sys2 "commit-ok")))
     (is (= {:cmd "commit"} (receive-and-reply sys1 "commit-not-ok")))
+    (assert-value sys1 nil {:value 11 :state "prepare-ok"})
     (is (= {:cmd "commit"} (receive-and-reply sys1 "commit-ok")))
-    (is (= "TRANSACTION SUCCEEDED" (<!! test-chan)))
+    (assert-value sys1 11 nil)
+    (is (= "TRANSACTION SUCCEEDED" (<!!-timeout test-chan)))
     (is (= {:sys1 "commit-ok" :sys2 "commit-ok"} (state coord)))
   ))
 
@@ -47,16 +60,17 @@
   (let [[coord sys1 sys2] (two-pc)
         test-chan (chan 100)]
     (log coord "\n WRITE ABORT")
-    (go 
-      (let [result (<! (transact coord 11))]
-        (>! test-chan result)
-        (log coord result)
-        (log-state coord)))
+    (setup-transact coord 11 test-chan)
+
     (is (= {:cmd "write" :value 11} (receive-and-reply sys1 "write-ok")))
+    (assert-value sys1 nil {:value 11 :state "write-ok"})
     (is (= {:cmd "write" :value 11} (receive-and-reply sys2 "write-not-ok")))
+    (assert-value sys2 nil nil)
     (is (= {:cmd "abort"} (receive-and-reply sys1 "abort-ok")))
+    (assert-value sys1 nil nil)
     (is (= {:cmd "abort"} (receive-and-reply sys2 "abort-ok")))
-    (is (= "TRANSACTION FAILED" (<!! test-chan)))
+    (assert-value sys2 nil nil)
+    (is (= "TRANSACTION FAILED" (<!!-timeout test-chan)))
     (is (= {:sys1 "abort-ok" :sys2 "abort-ok"} (state coord)))
   ))
 
@@ -64,18 +78,19 @@
   (let [[coord sys1 sys2] (two-pc)
         test-chan (chan 100)]
     (log coord "\n PREPARE ABORT")
-    (go 
-      (let [result (<! (transact coord 11))]
-        (>! test-chan result)
-        (log coord result)
-        (log-state coord)))
+    (setup-transact coord 11 test-chan)
+
     (is (= {:cmd "write" :value 11} (receive-and-reply sys1 "write-ok")))
     (is (= {:cmd "write" :value 11} (receive-and-reply sys2 "write-ok")))
     (is (= {:cmd "prepare"} (receive-and-reply sys1 "prepare-ok")))
+    (assert-value sys1 nil {:value 11 :state "prepare-ok"})
     (is (= {:cmd "prepare"} (receive-and-reply sys2 "prepare-not-ok")))
+    (assert-value sys2 nil nil)
     (is (= {:cmd "abort"} (receive-and-reply sys1 "abort-ok")))
+    (assert-value sys1 nil nil)
     (is (= {:cmd "abort"} (receive-and-reply sys2 "abort-ok")))
-    (is (= "TRANSACTION FAILED" (<!! test-chan)))
+    (assert-value sys2 nil nil)
+    (is (= "TRANSACTION FAILED" (<!!-timeout test-chan)))
     (is (= {:sys1 "abort-ok" :sys2 "abort-ok"} (state coord)))
   ))
 
