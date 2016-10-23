@@ -1,6 +1,6 @@
 (ns core-async-playground.two-pc
   (:require
-    [clojure.core.async :as async :refer [<! >! <!! >!! timeout chan alt! alts! alts!! go go-loop close! thread put!]]
+    [clojure.core.async :as async :refer [<! >! <!! >!! chan alt! alts! alts!! go go-loop close! thread put!]]
     [clojure.algo.generic.functor :refer (fmap)]
   ))
 
@@ -56,7 +56,7 @@
 
 (defn- send-cmd [coord ids cmd]
   (doseq [id ids]
-    (>!! (id (:ss coord)) [(:chan coord) cmd])
+    (>!! (id (:ss coord)) [cmd (:chan coord)])
     (log coord (str "coord sent " cmd " to " id))
     (set-state! coord id (:cmd cmd))))
 
@@ -105,11 +105,17 @@
         "TRANSACTION FAILED"))
   ))
 
-(defn receive-and-reply [sys st]
-  (let [[sender msg] (<!! (:chan sys))
-        id (:id sys)]
-    (log sys (str id " received " msg))
-    (>!! sender [id st])
-    (log sys (str id " sent " st))
-))
+(defn receive-and-reply 
+  ([sys st timeout]
+    (first (alts!!
+      [(go
+        (let [[msg sender] (<! (:chan sys))
+                id (:id sys)]
+          (log sys (str id " received " msg))
+          (>! sender [id st])
+          (log sys (str id " sent " st))
+          msg))
+      (async/timeout timeout)]))
+  )
+  ([sys st] (receive-and-reply sys st 100)))
 
