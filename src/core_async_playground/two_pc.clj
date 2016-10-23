@@ -1,5 +1,8 @@
 (ns core-async-playground.two-pc
-  (:require [clojure.core.async :as async :refer [<! >! <!! >!! timeout chan alt! alts! alts!! go go-loop close! thread put!]]))
+  (:require
+    [clojure.core.async :as async :refer [<! >! <!! >!! timeout chan alt! alts! alts!! go go-loop close! thread put!]]
+    [clojure.algo.generic.functor :refer (fmap)]
+  ))
 
 ; retry aborts
 ; add timeouts for write and prepare
@@ -37,12 +40,11 @@
     result
   ))
 
-(defn- print-state [coord]
-  (str "STATE: " (vec (map (fn [[id st]] [id @st]) (:state coord)))))
-(defn- log [log-holder msg]
+(defn state [coord] (fmap deref (:state coord)))
+(defn log [log-holder msg]
   ((:log log-holder) msg))
-(defn- log-state [coord]
-  (log coord (print-state coord)))
+(defn log-state [coord]
+  (log coord (str "state: " (state coord))))
 
 (defn- set-state! [coord id st] 
   (reset! (id (:state coord)) st)
@@ -104,37 +106,10 @@
   ))
 
 (defn receive-and-reply [sys st]
-  (go
-    (let [[sender msg] (<! (:chan sys))
-          id (:id sys)]
-      (log sys (str id " received " msg))
-      (>! sender [id st])
-      (log sys (str id " sent " st))
-  )))
+  (let [[sender msg] (<!! (:chan sys))
+        id (:id sys)]
+    (log sys (str id " received " msg))
+    (>!! sender [id st])
+    (log sys (str id " sent " st))
+))
 
-;;;
-
-(let [[coord sys1 sys2] (two-pc)]
-  (go 
-    (log coord (<! (transact coord 11)))
-    (log-state coord))
-  (receive-and-reply sys1 "write-ok")
-  (receive-and-reply sys2 "write-ok")
-  (receive-and-reply sys1 "prepare-ok")
-  (receive-and-reply sys2 "prepare-ok")
-  (receive-and-reply sys1 "commit-not-ok")
-  (receive-and-reply sys2 "commit-ok")  
-  (receive-and-reply sys1 "commit-ok")
-  ""
-)
-  
-(let [[coord sys1 sys2] (two-pc)]
-  (go 
-    (log coord (<! (transact coord 11)))
-    (log-state coord))
-  (receive-and-reply sys1 "write-ok")
-  (receive-and-reply sys2 "write-not-ok")
-  (receive-and-reply sys1 "abort-ok")
-  (receive-and-reply sys2 "abort-ok")
-  ""
-)
